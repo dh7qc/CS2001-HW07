@@ -19,10 +19,6 @@ on each page.
 `
 
 // Parses options passed on the command line.
-//
-// Returns the word to search for, the number of workers to use, and a
-// slice of links to look at. If the CLI options do not pass a sanity
-// check, an error message is shown followed by the program usage.
 func parseCLI() (word string, numWorkers uint, links []string) {
 	// Set the usage message for the cli parser
 	flag.Usage = func() {
@@ -69,34 +65,51 @@ type Result struct {
 }
 
 // Formats a Result as a string.
-//
-// String returns the string representation of the received Result
 func (r Result) String() string {
 	return fmt.Sprintf("%s\n\tcount: %d\n\terror: %v", r.link, r.count, r.err)
 }
 
-// countOccurrences counts the number of occurrences of `word` in
-// `s`. It splits `s` into words and compares each word to `word`,
-// counting the number of matches.
-//
-// It returns the number of occurences found while scanning and the
-// first error encountered, if any.
+// countOccurrences counts the number of occurrences of `word` in `s`.
 func countOccurrences(word string, s io.Reader) (uint, error) {
+	// Make a scanner from the s io.Reader, and split by words.
+	scanner := bufio.NewScanner(s)
+	scanner.Split(bufio.ScanWords)
 
+	var count uint = 0
+
+	for scanner.Scan() {
+		// Use scanner.Text() to get the current word.
+		// Increment count if the word matches.
+		if word == scanner.Text() {
+			count++
+		}
+	}
+
+	// Return error if there is one.
+	if err := scanner.Err(); err != nil {
+		return count, err
+	}
+	return count, nil
 }
 
 // wordsOnPage reads links from the `links` channel searching for
-// occurrences of `word` and sending Results over the `results`
-// channel.
-//
-// wordsOnPage continually receives values from the `links`
-// channel. When it receives a value, it fetches the page data, counts
-// occurrences of `word` on the page, and sends results over
-// `results`. If any error is encountered, it is packed into a Result
-// and sent over the `results` channel. When there are no more links
-// to read, the function returns.
+// occurrences of `word` and sending Results over the `results` channel.
 func wordsOnPage(word string, links chan string, results chan Result) {
+	// Loop, receiving from links until it is closed.
+	for link := range links {
+		// Get the link.
+		res, err := http.Get(link)
 
+		// Send result with error if there was one.
+		if err != nil {
+			results <- Result{link, 0, err}
+		} else if res.StatusCode != 200 {
+			results <- Result{link, 0, errors.New("Did not receive 200 OK")}
+		} else {
+			count, err := countOccurrences(word, res.Body)
+			results <- Result{link, count, err}
+		}
+	}
 }
 
 //Parses CLI args. Spins up workers (goroutines) as specified by the
@@ -104,5 +117,29 @@ func wordsOnPage(word string, links chan string, results chan Result) {
 //channel for processing, closes the channel, then reads all results
 //from goroutines.
 func main() {
+	// Parse options
+	word, numWorkers, links := parseCLI()
+
+	// Make the channels for sending/receiving.
+	link_chan := make(chan string, len(links))
+	result_chan := make(chan Result, len(links))
+
+	// For the number of workers... spin up go routines
+	for i := 0; i < int(numWorkers); i++ {
+		go wordsOnPage(word, link_chan, result_chan)
+	}
+
+	// Send the links for processing.
+	for _, link := range links {
+		link_chan <- link
+	}
+
+	// Close link channel because we are done sending links.
+	close(link_chan)
+
+	// Receive results
+	for i := 0; i < len(links); i++ {
+		fmt.Println(<-result_chan)
+	}
 
 }
